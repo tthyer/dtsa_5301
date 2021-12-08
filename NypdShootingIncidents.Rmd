@@ -1,0 +1,174 @@
+---
+title: "NYPD Shooting Incidents"
+date: "10/30/2021"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(lubridate)
+library(ggplot2)
+library(scales)
+```
+
+## NYPD Shooting Incident Data (Historic)
+
+This is an analysis of historic shooting data from New York City. For more information on how this data is collected, or to access the data dictionary, see the [City of New York web site](https://data.cityofnewyork.us/Public-Safety/NYPD-Shooting-Incident-Data-Historic-/833y-fsy8).
+
+This data will be analyzed for trends, particularly regarding time of day.
+
+### Read
+
+Read historic shooting data from New York City.
+
+```{r read}
+url = "https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD"
+raw_shootings <- read_csv(url, show_col_types = FALSE)
+```
+
+### Tidy
+
+Parse dates, deal with values that don't make sense, replace NAs.
+
+```{r tidy}
+shootings <- raw_shootings %>%
+  mutate(OCCUR_DATE = mdy(OCCUR_DATE)) %>%
+  mutate(PERP_AGE_GROUP = na_if(PERP_AGE_GROUP, 1020)) %>%
+  mutate(PERP_AGE_GROUP = na_if(PERP_AGE_GROUP, 940)) %>%
+  mutate(PERP_AGE_GROUP = na_if(PERP_AGE_GROUP, 224)) %>% 
+  mutate(PERP_AGE_GROUP = replace_na(PERP_AGE_GROUP, "UNKNOWN")) %>% 
+  mutate(PERP_SEX = replace_na(PERP_SEX, "U")) %>% 
+  mutate(PERP_RACE = replace_na(PERP_RACE, "UNKNOWN"))
+```
+
+## Visualize
+
+### Perpetrator Age
+
+Group by perpetrator age, and graph using a bar plot.
+
+```{r age, echo=FALSE}
+by_age <- shootings %>%
+  count(PERP_AGE_GROUP, name='count')
+
+by_age %>%
+  ggplot(aes(x=by_age$PERP_AGE_GROUP, y=by_age$count)) +
+  geom_bar(stat = "identity", aes(fill=by_age$PERP_AGE_GROUP)) +
+  xlab('Age of Perpetrator') +
+  ylab('Number of Shootings') +
+  theme(legend.position="none") +
+  labs(title = "Shootings by Perpetrator Age")
+```
+
+Conclusion: if unknowns are excluded, the vast majority of shootings are carried out by people between the ages of 18 and 44. The majority appear to be carried about in an age range of only six years. The next range, 25-44, spans nearly twenty years. It would be interesting to get a more granular breakdown, such as if we could determine the exact ages. 
+
+### Gender
+
+Count the number of shootings for each gender: M (male), F (female), U (unknown or unspecified). Males account for the vast majority of shootings.
+
+```{r gender, echo=FALSE}
+by_gender <- shootings %>%
+  count(PERP_SEX, name='count')
+
+by_gender %>%
+  ggplot(aes(x=by_gender$PERP_SEX, y=by_gender$count)) +
+  geom_bar(stat = "identity", aes(fill=by_gender$PERP_SEX)) +
+  xlab('Gender Classification of Perp') +
+  ylab('Number of Shootings') +
+  theme(legend.position="none") +
+  labs(title = "Shootings by Perpetrator Gender")
+```
+
+### Time of Day
+
+Look at the number of shootings reported by time of day. Times are binned into 1/2 hour segments to smooth the graph and see a general trend.
+
+```{r time_of_day}
+shootings %>%
+  ggplot(aes(x = OCCUR_TIME)) +
+  geom_line(stat="bin", binwidth=1800) +
+  theme(legend.position = "bottom",
+        axis.text.x = element_text(angle = 90)) +
+  labs(title = "Shootings by time of day", y = NULL) +
+  xlab(label = "Time of Day") +
+  scale_x_time(
+    breaks = scales::breaks_width("120 min"),
+    labels = label_time(format = "%H:%M"),
+    limits = c(lubridate::hms("00:00:00"), lubridate::hms("24:00:00")),
+    expand = c(0,0) # remove padding on either side of data on x-axis
+    )
+```
+
+## Model
+
+This is an experiment to see whether I can create a linear model that will fit the trend of when shootings occur by hour of day. The formula for this model has to be quadratic to fit curve above. 
+
+```{r hourly}
+
+hourly_shootings <- shootings %>%
+  mutate(year = year(OCCUR_DATE )) %>%
+  mutate(hour = hour(OCCUR_TIME)) %>%
+  count(hour, year, name="total_hour_shootings_by_year") %>%
+  ungroup()
+
+hourly_model <- lm(total_hour_shootings_by_year ~ hour + I(hour^2), data=hourly_shootings)
+summary(hourly_model)
+```
+
+Results: The p-value is very low, but the residual standard error and R-squared aren't impressive. That's not too surprising considering the high amount of deviation for each hour.
+
+### Add prediction and plot
+
+The following plots show that:
+
+1. There is a high degree of variation for each hour and
+2. The quadratic curve begins to approach the real curve but isn't quite there yet
+
+```{r predict_hourly}
+hourly_shootings <- hourly_shootings %>%
+  mutate(prediction = predict(hourly_model))
+
+hourly_shootings %>%
+  ggplot() +
+  geom_point(aes(x = hour, y = total_hour_shootings_by_year), color="blue") +
+  geom_point(aes(x = hour, y = prediction), color="red")
+
+hourly_shootings %>%
+  ggplot(aes(x = hour, y=total_hour_shootings_by_year, group = hour)) +
+  geom_boxplot() +
+  geom_point(aes(x = hour, y = prediction), color="red")
+```
+
+## Additional Questions
+
+1. More time-based analysis: in addition to time of day, do shootings vary by time of year?
+2. More time-based analysis: are shootings more prevalent in past years or recent years?
+3. Since we have latitude and longitude, plot the shootings with a heat map to reveal hot spots. See how these vary over time.
+4. Attempt to create a prediction for number of shootings over some time period (i.e monthly or annually) occurring in each borough and compare to the actual rate.
+5. Explore demographic relationships between perpetrators and victims.
+
+## Bias
+
+In my initial analysis I asked three questions:
+
+1. How does the number of shootings compare for each perpetrator age range?
+2. How does the number of shootings compare by perpetrator gender identification?
+3. How does time of day affect the likelihood that a shooting may occur?
+
+The first two questions could be said to be biased. I was looking for a pattern of who is most likely to be the perpetrator based on their gender and age. While it seems like there is a pattern, perhaps better questions to ask would be ones that deal with other characteristics, such as particular locations. In some ways I feel that the very type of data collected in this dataset is biased. 
+
+Some other types of data about shootings that could be gathered:
+
+1. Do perpetrator and victim know one another?
+2. Was the gun used legally licensed to the perpetrator?
+3. Has this perpetrator been involved in shootings in the past?
+4. Has this perpetrator been charged with other types of crimes?
+
+I was reluctant to even ask any questions about race as I felt those were in too much danger of being biased or being interpreted in a biased way. I also feel that when handling this sort crime data, where the way we've mishandled it in the past has had such a negative impact, we have to be very careful about what questions we ask.
+
+
+
+
